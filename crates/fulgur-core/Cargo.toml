@@ -1,0 +1,28 @@
+[package]
+name = "fulgur-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+sha2.workspace = true
+sysinfo = { version = "=0.33.1", default-features = false, features = ["system"] }
+roxmltree = "0.21.2"
+miniz_oxide = "0.9.1"
+ruzstd = "0.8.2"
+sha1 = "0.11.0"
+sha3 = "0.12.0"
+base64 = "0.23.1"
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "tiff", "webp", "bmp"] }
+# Same pure-Rust crate `image` already uses; called directly for TIFF layouts
+# `image` 0.25 rejects (mono 32-bit float, 32/64-bit integer, 64-bit float).
+tiff = "0.10.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

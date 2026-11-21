@@ -1,0 +1,19 @@
+[package]
+name = "fulgur-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fulgur-core = { path = "../fulgur-core" }
+fulgur-catalog = { path = "../fulgur-catalog" }
+fulgur-solve = { path = "../fulgur-solve" }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg"] }

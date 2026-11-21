@@ -1,0 +1,157 @@
+//! Eight same-phase VNG lanes; AVX2 is runtime-selected, scalar stays portable.
+
+const VECTOR_LIMIT: f32 = 1.0e30;
+
+pub(super) struct Kernel {
+    pub(super) vector: bool,
+}
+impl Kernel {
+    pub fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        let vector = std::is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let vector = false;
+        Self { vector }
+    }
+    pub fn pairs<const LEFT: usize, const RIGHT: usize>(
+        &self,
+        rows: &[&[f32]; 5],
+        row: &mut [[f32; 3]],
+    ) -> usize {
+        #[cfg(target_arch = "x86_64")]
+        if self.vector {
+            // SAFETY: only detect() constructs a vector kernel, after AVX2 detection.
+            return unsafe { vector::pairs::<LEFT, RIGHT>(rows, row) };
+        }
+        let _ = (rows, row);
+        0
+    }
+}
+
+pub(super) fn bounded(row: &[f32]) -> bool {
+    row.iter().all(|v| v.abs() <= VECTOR_LIMIT)
+}
+
+#[cfg(target_arch = "x86_64")]
+mod vector {
+    use std::arch::x86_64::*;
+
+    include!(concat!(env!("OUT_DIR"), "/vng_kernels_avx2.rs"));
+
+    thread_local! {
+        static PLANES: std::cell::Cell<Vec<f32>> = const { std::cell::Cell::new(Vec::new()) };
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn difference(window: &[__m256; 25], a: usize, b: usize, weight: u32) -> __m256 {
+        let d = _mm256_sub_ps(window[a], window[b]);
+        _mm256_mul_ps(
+            _mm256_set1_ps(f32::from_bits(weight)),
+            _mm256_andnot_ps(_mm256_set1_ps(-0.), d),
+        )
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn start(gradients: &[__m256; 8]) -> (__m256, [__m256; 3], __m256i) {
+        let mut min = _mm256_set1_ps(f32::INFINITY);
+        let mut max = _mm256_setzero_ps();
+        for &g in gradients {
+            min = _mm256_min_ps(min, g);
+            max = _mm256_max_ps(max, g);
+        }
+        let threshold = _mm256_add_ps(min, _mm256_mul_ps(_mm256_set1_ps(0.5), max));
+        (threshold, [_mm256_setzero_ps(); 3], _mm256_setzero_si256())
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn add_if(sum: __m256, sample: __m256, weight: u32, taken: __m256) -> __m256 {
+        let added = _mm256_add_ps(
+            sum,
+            _mm256_mul_ps(sample, _mm256_set1_ps(f32::from_bits(weight))),
+        );
+        _mm256_blendv_ps(sum, added, taken)
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn finish(
+        window: &[__m256; 25],
+        sums: [__m256; 3],
+        count: __m256i,
+        native: usize,
+    ) -> [__m256; 3] {
+        let count = _mm256_cvtepi32_ps(count);
+        let mut pixel = std::array::from_fn(|c| {
+            _mm256_add_ps(
+                window[12],
+                _mm256_div_ps(_mm256_sub_ps(sums[c], sums[native]), count),
+            )
+        });
+        pixel[native] = window[12];
+        pixel
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn load(plane: &[f32], start: usize) -> __m256 {
+        let lanes = &plane[start..start + 8];
+        unsafe { _mm256_loadu_ps(lanes.as_ptr()) }
+    }
+
+    #[target_feature(enable = "avx2")]
+    fn window(planes: &[f32], stride: usize, k: usize, right: bool) -> [__m256; 25] {
+        std::array::from_fn(|i| {
+            let (j, c) = (i / 5, i % 5);
+            let source = c + usize::from(right);
+            load(
+                &planes[(2 * j + source % 2) * stride..][..stride],
+                k + source / 2,
+            )
+        })
+    }
+
+    #[target_feature(enable = "avx2")]
+    fn store(row: &mut [[f32; 3]], first: usize, pixel: [__m256; 3]) {
+        let mut channels = [[0.; 8]; 3];
+        for (lanes, value) in channels.iter_mut().zip(pixel) {
+            unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), value) };
+        }
+        for lane in 0..8 {
+            row[first + 2 * lane] = [channels[0][lane], channels[1][lane], channels[2][lane]];
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn pairs<const LEFT: usize, const RIGHT: usize>(
+        rows: &[&[f32]; 5],
+        row: &mut [[f32; 3]],
+    ) -> usize {
+        let width = row.len();
+        let pairs = width.saturating_sub(4) / 2;
+        let groups = pairs / 8;
+        if groups == 0 {
+            return 0;
+        }
+        let stride = pairs + 2;
+        let mut planes = PLANES.take();
+        planes.resize(10 * stride, 0.);
+        for (index, plane) in planes.chunks_exact_mut(stride).enumerate() {
+            let (source, parity) = (rows[index / 2], index % 2);
+            for (m, value) in plane.iter_mut().enumerate() {
+                *value = source[2 * m + parity];
+            }
+        }
+        for group in 0..groups {
+            let k = group * 8;
+            let left = reconstruct::<LEFT>(&window(&planes, stride, k, false));
+            store(row, 2 + 2 * k, left);
+            let right = reconstruct::<RIGHT>(&window(&planes, stride, k, true));
+            store(row, 3 + 2 * k, right);
+        }
+        PLANES.set(planes);
+        groups * 8
+    }
+}
